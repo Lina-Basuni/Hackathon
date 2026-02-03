@@ -74,7 +74,14 @@ export async function generateFullReport(input: PipelineInput): Promise<Pipeline
     // ===========================================
     reportProgress("transcribing", 15, "Transcribing your voice note...", "Converting speech to text");
 
-    const transcriptionResult = await transcribeAudio(audioBlob);
+    // Convert Blob to Buffer for transcription service
+    const audioArrayBuffer = await audioBlob.arrayBuffer();
+    const audioBufferForTranscription = Buffer.from(audioArrayBuffer);
+
+    const transcriptionResult = await transcribeAudio({
+      audio: audioBufferForTranscription,
+      mimeType: audioBlob.type || "audio/webm",
+    });
 
     if (!transcriptionResult.success || !transcriptionResult.transcript) {
       throw new Error(transcriptionResult.error || "Transcription failed");
