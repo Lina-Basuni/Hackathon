@@ -146,24 +146,6 @@ export default async function ReportPage({ params }: PageProps) {
           specialistRecommended={reportData.nextSteps.specialistTypeRecommended}
         />
       </div>
-
-      {/* Print Styles */}
-      <style jsx global>{`
-        @media print {
-          nav,
-          .no-print {
-            display: none !important;
-          }
-          body {
-            print-color-adjust: exact;
-            -webkit-print-color-adjust: exact;
-          }
-          .shadow-sm,
-          .shadow-md {
-            box-shadow: none !important;
-          }
-        }
-      `}</style>
     </div>
   );
 }

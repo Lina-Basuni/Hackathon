@@ -69,6 +69,21 @@ export async function generateFullReport(input: PipelineInput): Promise<Pipeline
 
     reportProgress("uploading", 10, "Voice note prepared");
 
+    // Ensure patient exists (create demo patient if needed)
+    const existingPatient = await prisma.patient.findUnique({
+      where: { id: patientId },
+    });
+
+    if (!existingPatient) {
+      await prisma.patient.create({
+        data: {
+          id: patientId,
+          name: "Demo Patient",
+          email: `${patientId}@demo.healthsnap.com`,
+        },
+      });
+    }
+
     // ===========================================
     // STAGE 2: Transcribe Audio
     // ===========================================
@@ -224,7 +239,16 @@ export interface PipelineJob {
 }
 
 // In-memory job store (in production, use Redis or database)
-const jobStore = new Map<string, PipelineJob>();
+// Use global to persist across hot reloads in development
+const globalForJobs = globalThis as unknown as {
+  jobStore: Map<string, PipelineJob> | undefined;
+};
+
+const jobStore = globalForJobs.jobStore ?? new Map<string, PipelineJob>();
+
+if (process.env.NODE_ENV !== "production") {
+  globalForJobs.jobStore = jobStore;
+}
 
 export function createJob(): string {
   const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
