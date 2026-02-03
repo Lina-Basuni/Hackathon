@@ -170,6 +170,10 @@ model Doctor {
   bio               String?
   imageUrl          String?
 
+  // Education & Credentials
+  education         String?  // JSON: [{degree, institution, year}]
+  certifications    String?  // JSON: ["Board Certified", etc.]
+
   // Availability
   available         Boolean  @default(true)
 
@@ -178,26 +182,52 @@ model Doctor {
   // Relations
   timeSlots    TimeSlot[]
   appointments Appointment[]
+  reviews      DoctorReview[]
 
   @@index([specialty])
   @@index([available])
   @@index([location])
 }
 
+model DoctorReview {
+  id        String   @id @default(cuid())
+  doctorId  String
+
+  rating    Float    // 1-5 stars
+  comment   String?
+  author    String   // Patient name or "Anonymous"
+
+  createdAt DateTime @default(now())
+
+  // Relations
+  doctor Doctor @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+
+  @@index([doctorId])
+}
+
 model TimeSlot {
   id            String    @id @default(cuid())
   doctorId      String
-  datetime      DateTime  // Full datetime of the slot
+
+  // Time information
+  date          DateTime  // Date of the slot (date portion only)
+  startTime     String    // "09:00" format
+  endTime       String    // "09:30" format
+  duration      Int       @default(30) // Duration in minutes
+
+  // Status
   isBooked      Boolean   @default(false)
-  appointmentId String?   @unique // Links to appointment when booked
+  isBlocked     Boolean   @default(false) // For doctor-blocked times
+
+  createdAt     DateTime  @default(now())
 
   // Relations
   doctor      Doctor       @relation(fields: [doctorId], references: [id], onDelete: Cascade)
-  appointment Appointment? @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+  appointment Appointment?
 
-  @@unique([doctorId, datetime])
+  @@unique([doctorId, date, startTime])
   @@index([doctorId])
-  @@index([datetime])
+  @@index([date])
   @@index([isBooked])
 }
 
@@ -208,19 +238,26 @@ model Appointment {
   timeSlotId  String    @unique
   reportId    String?   // Optional attached report
 
-  // Details
-  status      String    @default("scheduled") // scheduled | completed | cancelled
-  notes       String?
+  // Appointment details
+  reason      String    // Reason for visit
+  type        String    @default("in-person") // in-person | video | phone
+  status      String    @default("pending") // pending | confirmed | completed | cancelled
+  notes       String?   // Additional notes from patient
+
+  // Confirmation
+  confirmationCode String? @unique // e.g., "HS-ABC123"
 
   createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   // Relations
   patient  Patient   @relation(fields: [patientId], references: [id], onDelete: Cascade)
   doctor   Doctor    @relation(fields: [doctorId], references: [id], onDelete: Cascade)
-  timeSlot TimeSlot?
+  timeSlot TimeSlot  @relation(fields: [timeSlotId], references: [id], onDelete: Cascade)
   report   Report?   @relation(fields: [reportId], references: [id], onDelete: SetNull)
 
   @@index([patientId])
   @@index([doctorId])
   @@index([status])
+  @@index([confirmationCode])
 }
