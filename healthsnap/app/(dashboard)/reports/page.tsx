@@ -1,19 +1,18 @@
 import Link from "next/link";
-import { FileText, Calendar, ChevronRight, AlertTriangle } from "lucide-react";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/app/components/ui/card";
+import { FileText, Calendar, ChevronRight, AlertTriangle, Activity } from "lucide-react";
+import { Card, CardContent } from "@/app/components/ui/card";
 import { Badge } from "@/app/components/ui/badge";
 import prisma from "@/app/lib/prisma";
 import { format } from "date-fns";
+import { cn } from "@/app/lib/utils";
 
 export default async function ReportsPage() {
-  // Fetch voice notes with their risk assessments
-  const voiceNotes = await prisma.voiceNote.findMany({
-    where: {
-      status: "completed",
-      riskAssessment: { isNot: null },
-    },
+  // Fetch reports with related data
+  const reports = await prisma.report.findMany({
     include: {
+      patient: true,
       riskAssessment: true,
+      clinicalSummary: true,
     },
     orderBy: { createdAt: "desc" },
   });
@@ -27,7 +26,7 @@ export default async function ReportsPage() {
         </p>
       </div>
 
-      {voiceNotes.length === 0 ? (
+      {reports.length === 0 ? (
         <Card>
           <CardContent className="py-12 text-center">
             <FileText className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
@@ -45,41 +44,46 @@ export default async function ReportsPage() {
         </Card>
       ) : (
         <div className="space-y-4">
-          {voiceNotes.map((note) => {
-            const riskFlags = note.riskAssessment
-              ? JSON.parse(note.riskAssessment.riskFlags as string)
+          {reports.map((report) => {
+            const riskFlags = report.riskAssessment
+              ? safeJsonParse(report.riskAssessment.riskFlags, [])
               : [];
 
+            const acuity = report.riskAssessment?.overallAcuity || "routine";
+            const acuityConfig = getAcuityDisplay(acuity);
+
             return (
-              <Link key={note.id} href={`/reports/${note.id}`}>
+              <Link key={report.id} href={`/report/${report.id}`}>
                 <Card className="hover:shadow-md transition-shadow cursor-pointer">
                   <CardContent className="py-4">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-4">
-                        <div className="w-12 h-12 bg-primary/10 rounded-xl flex items-center justify-center">
-                          <FileText className="w-6 h-6 text-primary" />
+                        <div
+                          className={cn(
+                            "w-12 h-12 rounded-xl flex items-center justify-center",
+                            acuityConfig.bgColor
+                          )}
+                        >
+                          <Activity className={cn("w-6 h-6", acuityConfig.iconColor)} />
                         </div>
                         <div>
-                          <div className="flex items-center gap-2 mb-1">
-                            <h3 className="font-semibold">Health Snapshot</h3>
-                            {note.riskAssessment && (
-                              <Badge
-                                variant={
-                                  note.riskAssessment.overallRisk as
-                                    | "low"
-                                    | "moderate"
-                                    | "high"
-                                    | "critical"
-                                }
-                              >
-                                {note.riskAssessment.overallRisk.toUpperCase()}
+                          <div className="flex items-center gap-2 mb-1 flex-wrap">
+                            <h3 className="font-semibold">
+                              {report.clinicalSummary?.chiefComplaint || "Health Assessment"}
+                            </h3>
+                            <Badge className={cn(acuityConfig.badgeColor)}>
+                              {acuityConfig.label}
+                            </Badge>
+                            {report.status === "draft" && (
+                              <Badge variant="outline" className="text-xs">
+                                Draft
                               </Badge>
                             )}
                           </div>
-                          <div className="flex items-center gap-3 text-sm text-muted-foreground">
+                          <div className="flex items-center gap-3 text-sm text-muted-foreground flex-wrap">
                             <span className="flex items-center gap-1">
                               <Calendar className="w-4 h-4" />
-                              {format(new Date(note.createdAt), "MMM d, yyyy 'at' h:mm a")}
+                              {format(new Date(report.createdAt), "MMM d, yyyy 'at' h:mm a")}
                             </span>
                             {riskFlags.length > 0 && (
                               <span className="flex items-center gap-1">
@@ -90,7 +94,7 @@ export default async function ReportsPage() {
                           </div>
                         </div>
                       </div>
-                      <ChevronRight className="w-5 h-5 text-muted-foreground" />
+                      <ChevronRight className="w-5 h-5 text-muted-foreground flex-shrink-0" />
                     </div>
                   </CardContent>
                 </Card>
@@ -101,4 +105,40 @@ export default async function ReportsPage() {
       )}
     </div>
   );
+}
+
+function getAcuityDisplay(acuity: string) {
+  switch (acuity.toLowerCase()) {
+    case "emergent":
+      return {
+        label: "Emergent",
+        bgColor: "bg-red-100",
+        iconColor: "text-red-600",
+        badgeColor: "bg-red-100 text-red-700 border-red-200",
+      };
+    case "urgent":
+      return {
+        label: "Urgent",
+        bgColor: "bg-amber-100",
+        iconColor: "text-amber-600",
+        badgeColor: "bg-amber-100 text-amber-700 border-amber-200",
+      };
+    case "routine":
+    default:
+      return {
+        label: "Routine",
+        bgColor: "bg-green-100",
+        iconColor: "text-green-600",
+        badgeColor: "bg-green-100 text-green-700 border-green-200",
+      };
+  }
+}
+
+function safeJsonParse<T>(json: string | null | undefined, fallback: T): T {
+  if (!json) return fallback;
+  try {
+    return JSON.parse(json) as T;
+  } catch {
+    return fallback;
+  }
 }

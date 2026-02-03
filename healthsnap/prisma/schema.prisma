@@ -15,16 +15,15 @@ datasource db {
 // ===========================================
 
 model Patient {
-  id            String    @id @default(cuid())
-  email         String    @unique
-  name          String
-  dateOfBirth   DateTime?
-  phone         String?
-  address       String?
-  emergencyContact String?
-  medicalHistory   String? // JSON string for simplicity
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  id              String    @id @default(cuid())
+  name            String
+  email           String    @unique
+  phone           String?
+  dateOfBirth     DateTime?
+  sex             String?   // male | female | other
+  knownConditions String?   // JSON: ["diabetes", "hypertension", etc.]
+  medications     String?   // JSON: [{name, dosage, frequency}]
+  createdAt       DateTime  @default(now())
 
   // Relations
   voiceNotes    VoiceNote[]
@@ -39,56 +38,84 @@ model Patient {
 // ===========================================
 
 model VoiceNote {
-  id            String   @id @default(cuid())
-  patientId     String
-  audioUrl      String?  // Path to stored audio file
-  audioBlob     Bytes?   // Or store as blob for demo
-  duration      Int      // Duration in seconds
-  transcript    String?  // Speech-to-text result
-  status        String   @default("pending") // pending | transcribing | transcribed | analyzing | completed | failed
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id          String   @id @default(cuid())
+  patientId   String
+  audioUrl    String?  // Path to stored audio file or blob URL
+  transcript  String?  // Speech-to-text result
+  duration    Int      @default(0) // Duration in seconds
+  createdAt   DateTime @default(now())
 
   // Relations
-  patient       Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  patient        Patient         @relation(fields: [patientId], references: [id], onDelete: Cascade)
   riskAssessment RiskAssessment?
-  report        Report?
 
   @@index([patientId])
-  @@index([status])
+  @@index([createdAt])
 }
 
 model RiskAssessment {
-  id            String   @id @default(cuid())
-  voiceNoteId   String   @unique
+  id                 String   @id @default(cuid())
+  voiceNoteId        String   @unique
 
-  // Risk Flags (stored as JSON string)
-  riskFlags     String   // JSON: [{name, severity, description, indicators}]
+  // Extracted data
+  riskFlags          String   // JSON: [{flag, severity, description}]
+  symptomsExtracted  String   // JSON: [{symptom, duration, severity, location}]
+  vitalsMentioned    String?  // JSON: {bloodPressure, heartRate, temperature, etc.}
 
-  // Overall risk level
-  overallRisk   String   // low | moderate | high | critical
+  // Clinical assessment
+  overallAcuity      String   // routine | urgent | emergent
+  redFlags           String?  // JSON: ["chest pain at rest", "difficulty breathing", etc.]
 
-  // AI-generated content
-  clinicalSummary    String  // Summary for doctors
-  patientSummary     String  // Simplified summary for patient
-  recommendedActions String  // JSON: [{action, priority, timeframe}]
+  // AI confidence
+  confidence         Float    @default(0.85) // 0-1 scale
 
-  // Suggested specialties based on symptoms
-  suggestedSpecialties String // JSON: ["cardiology", "pulmonology", etc.]
-
-  // Confidence score (0-100)
-  confidenceScore Int
-
-  // Raw AI response for debugging
-  rawResponse   String?
-
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt          DateTime @default(now())
 
   // Relations
-  voiceNote     VoiceNote @relation(fields: [voiceNoteId], references: [id], onDelete: Cascade)
+  voiceNote       VoiceNote        @relation(fields: [voiceNoteId], references: [id], onDelete: Cascade)
+  clinicalSummary ClinicalSummary?
+  nextSteps       NextSteps?
+  report          Report?
 
-  @@index([overallRisk])
+  @@index([overallAcuity])
+}
+
+model ClinicalSummary {
+  id                  String   @id @default(cuid())
+  riskAssessmentId    String   @unique
+
+  chiefComplaint      String   // Main reason for visit
+  summaryText         String   // Narrative summary for clinicians
+  keyFindings         String   // JSON: ["finding1", "finding2", etc.]
+  timeline            String?  // Description of symptom progression
+  pertinentNegatives  String?  // JSON: ["no fever", "no chest pain", etc.]
+
+  createdAt           DateTime @default(now())
+
+  // Relations
+  riskAssessment RiskAssessment @relation(fields: [riskAssessmentId], references: [id], onDelete: Cascade)
+  report         Report?
+}
+
+model NextSteps {
+  id                        String   @id @default(cuid())
+  riskAssessmentId          String   @unique
+
+  recommendedAction         String   // Primary recommendation
+  urgencyTimeframe          String   // "within 24 hours", "within 1 week", etc.
+  reasoning                 String   // Why this recommendation
+
+  patientInstructions       String   // JSON: ["instruction1", "instruction2", etc.]
+  warningSigns              String   // JSON: ["sign1", "sign2", etc.] - when to seek immediate care
+  selfCareRecommendations   String?  // JSON: ["rest", "hydration", etc.]
+
+  specialistTypeRecommended String?  // cardiology, pulmonology, etc.
+
+  createdAt                 DateTime @default(now())
+
+  // Relations
+  riskAssessment RiskAssessment @relation(fields: [riskAssessmentId], references: [id], onDelete: Cascade)
+  report         Report?
 }
 
 // ===========================================
@@ -96,32 +123,30 @@ model RiskAssessment {
 // ===========================================
 
 model Report {
-  id            String   @id @default(cuid())
-  patientId     String
-  voiceNoteId   String   @unique
+  id                String   @id @default(cuid())
+  patientId         String
+  riskAssessmentId  String   @unique
+  clinicalSummaryId String   @unique
+  nextStepsId       String   @unique
 
-  // Report content
-  title         String
-  content       String   // Full formatted report (Markdown or HTML)
+  // Report status
+  status            String   @default("draft") // draft | final | sent
 
-  // Report metadata
-  generatedAt   DateTime @default(now())
-  expiresAt     DateTime? // Optional expiry for sharing links
+  // Sharing with doctor
+  sentToDoctor      String?  // Doctor ID or name
+  sentAt            DateTime?
 
-  // Sharing
-  shareToken    String?  @unique // For sharing with doctors
-  isShared      Boolean  @default(false)
-
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt         DateTime @default(now())
 
   // Relations
-  patient       Patient   @relation(fields: [patientId], references: [id], onDelete: Cascade)
-  voiceNote     VoiceNote @relation(fields: [voiceNoteId], references: [id], onDelete: Cascade)
-  appointments  Appointment[]
+  patient         Patient         @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  riskAssessment  RiskAssessment  @relation(fields: [riskAssessmentId], references: [id], onDelete: Cascade)
+  clinicalSummary ClinicalSummary @relation(fields: [clinicalSummaryId], references: [id], onDelete: Cascade)
+  nextSteps       NextSteps       @relation(fields: [nextStepsId], references: [id], onDelete: Cascade)
+  appointments    Appointment[]
 
   @@index([patientId])
-  @@index([shareToken])
+  @@index([status])
 }
 
 // ===========================================
@@ -129,100 +154,71 @@ model Report {
 // ===========================================
 
 model Doctor {
-  id            String   @id @default(cuid())
-  name          String
-  email         String   @unique
-  phone         String?
+  id                String   @id @default(cuid())
+  name              String
+  specialty         String   // primary-care, cardiology, pulmonology, gastroenterology, etc.
+  hospital          String?
+  location          String?  // City, State
 
-  // Professional info
-  specialty     String   // cardiology, pulmonology, general, etc.
-  qualifications String  // MD, MBBS, etc.
-  experience    Int      // Years of experience
-  bio           String?
-
-  // Location
-  hospital      String?
-  address       String?
-  city          String?
-
-  // Availability
-  isAvailable   Boolean  @default(true)
-  consultationFee Float?
-
-  // Rating (for demo purposes)
-  rating        Float    @default(4.5)
-  reviewCount   Int      @default(0)
+  // Additional info
+  languages         String?  // JSON: ["English", "Spanish", etc.]
+  acceptedInsurance String?  // JSON: ["Aetna", "Blue Cross", etc.]
 
   // Profile
-  imageUrl      String?
+  rating            Float    @default(4.5)
+  yearsExperience   Int      @default(5)
+  bio               String?
+  imageUrl          String?
 
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  // Availability
+  available         Boolean  @default(true)
+
+  createdAt         DateTime @default(now())
 
   // Relations
-  timeSlots     TimeSlot[]
-  appointments  Appointment[]
+  timeSlots    TimeSlot[]
+  appointments Appointment[]
 
   @@index([specialty])
-  @@index([isAvailable])
+  @@index([available])
+  @@index([location])
 }
 
 model TimeSlot {
-  id            String   @id @default(cuid())
+  id            String    @id @default(cuid())
   doctorId      String
-
-  // Slot details
-  date          DateTime // Date of the slot
-  startTime     String   // "09:00" format
-  endTime       String   // "09:30" format
-
-  // Availability
-  isBooked      Boolean  @default(false)
-  isBlocked     Boolean  @default(false) // Doctor blocked this slot
-
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  datetime      DateTime  // Full datetime of the slot
+  isBooked      Boolean   @default(false)
+  appointmentId String?   @unique // Links to appointment when booked
 
   // Relations
-  doctor        Doctor   @relation(fields: [doctorId], references: [id], onDelete: Cascade)
-  appointment   Appointment?
+  doctor      Doctor       @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  appointment Appointment? @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
 
-  @@unique([doctorId, date, startTime])
+  @@unique([doctorId, datetime])
   @@index([doctorId])
-  @@index([date])
+  @@index([datetime])
   @@index([isBooked])
 }
 
 model Appointment {
-  id            String   @id @default(cuid())
-  patientId     String
-  doctorId      String
-  timeSlotId    String   @unique
-  reportId      String?  // Optional attached report
+  id          String    @id @default(cuid())
+  patientId   String
+  doctorId    String
+  timeSlotId  String    @unique
+  reportId    String?   // Optional attached report
 
-  // Appointment details
-  reason        String   // Reason for visit
-  notes         String?  // Additional notes
+  // Details
+  status      String    @default("scheduled") // scheduled | completed | cancelled
+  notes       String?
 
-  // Status
-  status        String   @default("pending") // pending | confirmed | completed | cancelled | no-show
-
-  // Type
-  type          String   @default("in-person") // in-person | video | phone
-
-  // Confirmation
-  confirmedAt   DateTime?
-  cancelledAt   DateTime?
-  cancellationReason String?
-
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt   DateTime  @default(now())
 
   // Relations
-  patient       Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
-  doctor        Doctor   @relation(fields: [doctorId], references: [id], onDelete: Cascade)
-  timeSlot      TimeSlot @relation(fields: [timeSlotId], references: [id], onDelete: Cascade)
-  report        Report?  @relation(fields: [reportId], references: [id], onDelete: SetNull)
+  patient  Patient   @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  doctor   Doctor    @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  timeSlot TimeSlot?
+  report   Report?   @relation(fields: [reportId], references: [id], onDelete: SetNull)
 
   @@index([patientId])
   @@index([doctorId])

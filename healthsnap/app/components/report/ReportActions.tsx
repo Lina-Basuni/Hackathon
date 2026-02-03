@@ -1,0 +1,150 @@
+"use client";
+
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import {
+  UserSearch,
+  Download,
+  Share2,
+  Loader2,
+  Check,
+  Copy,
+  Mail,
+} from "lucide-react";
+import { Button } from "@/app/components/ui/button";
+import { Card, CardContent } from "@/app/components/ui/card";
+import { cn } from "@/app/lib/utils";
+
+interface ReportActionsProps {
+  reportId: string;
+  specialistRecommended: string | null;
+}
+
+export function ReportActions({
+  reportId,
+  specialistRecommended,
+}: ReportActionsProps) {
+  const router = useRouter();
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [showShareOptions, setShowShareOptions] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const handleFindDoctor = () => {
+    const params = specialistRecommended
+      ? `?specialty=${specialistRecommended}&reportId=${reportId}`
+      : `?reportId=${reportId}`;
+    router.push(`/doctors${params}`);
+  };
+
+  const handleDownload = async () => {
+    setIsDownloading(true);
+    // Simulate PDF generation
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    // In production, this would call an API to generate PDF
+    alert("PDF download would be triggered here");
+    setIsDownloading(false);
+  };
+
+  const handleCopyLink = async () => {
+    const shareUrl = `${window.location.origin}/report/${reportId}`;
+    await navigator.clipboard.writeText(shareUrl);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleEmailShare = () => {
+    const shareUrl = `${window.location.origin}/report/${reportId}`;
+    const subject = encodeURIComponent("HealthSnap Report");
+    const body = encodeURIComponent(
+      `I'd like to share my health assessment report with you:\n\n${shareUrl}`
+    );
+    window.open(`mailto:?subject=${subject}&body=${body}`);
+  };
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <h3 className="font-semibold text-slate-800 mb-4">What's Next?</h3>
+
+        <div className="grid sm:grid-cols-3 gap-3">
+          {/* Find a Doctor */}
+          <Button
+            onClick={handleFindDoctor}
+            className="h-auto py-4 flex flex-col items-center gap-2"
+          >
+            <UserSearch className="w-6 h-6" />
+            <span>Find a Doctor</span>
+            {specialistRecommended && (
+              <span className="text-xs opacity-80 capitalize">
+                {specialistRecommended.replace("-", " ")}
+              </span>
+            )}
+          </Button>
+
+          {/* Download PDF */}
+          <Button
+            variant="outline"
+            onClick={handleDownload}
+            disabled={isDownloading}
+            className="h-auto py-4 flex flex-col items-center gap-2"
+          >
+            {isDownloading ? (
+              <Loader2 className="w-6 h-6 animate-spin" />
+            ) : (
+              <Download className="w-6 h-6" />
+            )}
+            <span>{isDownloading ? "Generating..." : "Download PDF"}</span>
+          </Button>
+
+          {/* Share */}
+          <div className="relative">
+            <Button
+              variant="outline"
+              onClick={() => setShowShareOptions(!showShareOptions)}
+              className="w-full h-auto py-4 flex flex-col items-center gap-2"
+            >
+              <Share2 className="w-6 h-6" />
+              <span>Share Report</span>
+            </Button>
+
+            {/* Share Options Dropdown */}
+            {showShareOptions && (
+              <div className="absolute top-full left-0 right-0 mt-2 bg-white rounded-lg border shadow-lg z-10 overflow-hidden">
+                <button
+                  onClick={handleCopyLink}
+                  className="w-full px-4 py-3 flex items-center gap-3 hover:bg-slate-50 transition-colors text-left"
+                >
+                  {copied ? (
+                    <Check className="w-4 h-4 text-green-500" />
+                  ) : (
+                    <Copy className="w-4 h-4 text-slate-500" />
+                  )}
+                  <span className="text-sm">
+                    {copied ? "Copied!" : "Copy link"}
+                  </span>
+                </button>
+                <button
+                  onClick={handleEmailShare}
+                  className="w-full px-4 py-3 flex items-center gap-3 hover:bg-slate-50 transition-colors text-left border-t"
+                >
+                  <Mail className="w-4 h-4 text-slate-500" />
+                  <span className="text-sm">Send via email</span>
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Disclaimer */}
+        <div className="mt-6 p-4 bg-slate-50 rounded-lg border border-slate-100">
+          <p className="text-xs text-slate-500 leading-relaxed">
+            <strong>Important:</strong> This report is generated by an AI system
+            for informational purposes only. It is not a medical diagnosis and
+            should not replace professional medical advice. Always consult with
+            qualified healthcare providers for medical concerns.
+          </p>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}

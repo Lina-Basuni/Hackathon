@@ -1,125 +1,143 @@
 import { NextRequest, NextResponse } from "next/server";
-import Anthropic from "@anthropic-ai/sdk";
+import { runFullAnalysis, type DoctorForMatching } from "@/app/lib/services/ai-analysis";
 import prisma from "@/app/lib/prisma";
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY!,
-});
-
-const ANALYSIS_PROMPT = `You are a medical AI assistant helping to analyze patient symptom descriptions.
-Analyze the following patient transcript and provide a structured risk assessment.
-
-IMPORTANT: This is for informational purposes only and NOT a medical diagnosis. Always recommend professional medical consultation.
-
-Based on the transcript, provide:
-1. Risk flags (potential health concerns with severity levels)
-2. Clinical summary (professional summary for healthcare providers)
-3. Patient-friendly summary (easy to understand explanation)
-4. Recommended actions with priority and timeframe
-5. Suggested medical specialties that may be relevant
-
-Respond in the following JSON format ONLY (no markdown, no code blocks):
-{
-  "riskFlags": [
-    {
-      "name": "flag name",
-      "severity": "low|moderate|high|critical",
-      "description": "brief description",
-      "indicators": ["symptom1", "symptom2"]
-    }
-  ],
-  "overallRisk": "low|moderate|high|critical",
-  "clinicalSummary": "professional clinical summary",
-  "patientSummary": "patient-friendly explanation",
-  "recommendedActions": [
-    {
-      "action": "action description",
-      "priority": "immediate|soon|routine",
-      "timeframe": "timeframe description"
-    }
-  ],
-  "suggestedSpecialties": ["specialty1", "specialty2"],
-  "confidenceScore": 75
-}`;
+// ===========================================
+// POST /api/analyze
+// Full analysis pipeline: transcript → risk → summary → next steps → doctor matching
+// ===========================================
 
 export async function POST(request: NextRequest) {
   try {
-    const { voiceNoteId, transcript } = await request.json();
+    const body = await request.json();
+    const {
+      transcript,
+      voiceNoteId,
+      patientId,
+      patientContext,
+      includeDoctorMatching = true,
+    } = body;
 
-    if (!transcript) {
+    // Validate required fields
+    if (!transcript || typeof transcript !== "string") {
       return NextResponse.json(
         { success: false, error: "Transcript is required" },
         { status: 400 }
       );
     }
 
-    // Update voice note status
-    if (voiceNoteId) {
-      await prisma.voiceNote.update({
-        where: { id: voiceNoteId },
-        data: { status: "analyzing" },
-      });
+    if (transcript.length < 10) {
+      return NextResponse.json(
+        { success: false, error: "Transcript is too short for analysis" },
+        { status: 400 }
+      );
     }
 
-    // Call Claude API for analysis
-    const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 2000,
-      messages: [
-        {
-          role: "user",
-          content: `${ANALYSIS_PROMPT}\n\nPatient Transcript:\n"${transcript}"`,
-        },
-      ],
-    });
+    // Check for API key
+    if (!process.env.ANTHROPIC_API_KEY) {
+      return NextResponse.json(
+        { success: false, error: "AI service not configured" },
+        { status: 503 }
+      );
+    }
 
-    // Extract text content from response
-    const responseText =
-      message.content[0].type === "text" ? message.content[0].text : "";
+    // Fetch patient context from database if patientId provided
+    let enrichedPatientContext = patientContext;
+    if (patientId && !patientContext) {
+      const patient = await prisma.patient.findUnique({
+        where: { id: patientId },
+      });
 
-    // Parse the JSON response
-    let analysis;
-    try {
-      analysis = JSON.parse(responseText);
-    } catch {
-      // Try to extract JSON from response if it has markdown code blocks
-      const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        analysis = JSON.parse(jsonMatch[0]);
-      } else {
-        throw new Error("Failed to parse AI response");
+      if (patient) {
+        enrichedPatientContext = {
+          name: patient.name,
+          age: patient.dateOfBirth
+            ? Math.floor(
+                (Date.now() - patient.dateOfBirth.getTime()) /
+                  (365.25 * 24 * 60 * 60 * 1000)
+              )
+            : undefined,
+          sex: patient.sex || undefined,
+          knownConditions: patient.knownConditions
+            ? JSON.parse(patient.knownConditions)
+            : undefined,
+          currentMedications: patient.medications
+            ? JSON.parse(patient.medications)
+            : undefined,
+        };
       }
     }
 
-    // Save risk assessment to database
-    if (voiceNoteId) {
-      await prisma.riskAssessment.create({
-        data: {
-          voiceNoteId,
-          riskFlags: JSON.stringify(analysis.riskFlags),
-          overallRisk: analysis.overallRisk,
-          clinicalSummary: analysis.clinicalSummary,
-          patientSummary: analysis.patientSummary,
-          recommendedActions: JSON.stringify(analysis.recommendedActions),
-          suggestedSpecialties: JSON.stringify(analysis.suggestedSpecialties),
-          confidenceScore: analysis.confidenceScore || 75,
-          rawResponse: responseText,
+    // Fetch available doctors for matching
+    let availableDoctors: DoctorForMatching[] | undefined;
+    if (includeDoctorMatching) {
+      const doctors = await prisma.doctor.findMany({
+        where: { available: true },
+        include: {
+          timeSlots: {
+            where: {
+              isBooked: false,
+              datetime: { gte: new Date() },
+            },
+          },
         },
       });
 
-      // Update voice note status
-      await prisma.voiceNote.update({
-        where: { id: voiceNoteId },
-        data: { status: "completed" },
-      });
+      availableDoctors = doctors.map((d) => ({
+        id: d.id,
+        name: d.name,
+        specialty: d.specialty,
+        yearsExperience: d.yearsExperience,
+        rating: d.rating,
+        location: d.location || undefined,
+        languages: d.languages ? JSON.parse(d.languages) : undefined,
+        availableSlots: d.timeSlots.length,
+      }));
+    }
+
+    // Run the full analysis pipeline
+    const result = await runFullAnalysis(
+      {
+        transcript,
+        voiceNoteId,
+        patientId,
+        patientContext: enrichedPatientContext,
+      },
+      availableDoctors
+    );
+
+    // Save results to database
+    if (voiceNoteId && patientId) {
+      try {
+        await saveAnalysisToDatabase(voiceNoteId, patientId, result);
+      } catch (dbError) {
+        console.error("Failed to save analysis to database:", dbError);
+        // Continue - analysis succeeded, just database save failed
+      }
     }
 
     return NextResponse.json({
       success: true,
-      data: analysis,
+      data: result,
     });
   } catch (error) {
-    console.error("Analysis error:", error);
+    console.error("Analysis API error:", error);
+
+    // Handle specific error types
+    if (error instanceof Error) {
+      if (error.message.includes("API key")) {
+        return NextResponse.json(
+          { success: false, error: "AI service authentication failed" },
+          { status: 503 }
+        );
+      }
+      if (error.message.includes("rate limit")) {
+        return NextResponse.json(
+          { success: false, error: "Service temporarily busy. Please try again." },
+          { status: 429 }
+        );
+      }
+    }
 
     return NextResponse.json(
       {
@@ -129,4 +147,116 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   }
+}
+
+// ===========================================
+// SAVE ANALYSIS TO DATABASE
+// ===========================================
+
+interface AnalysisResult {
+  riskAssessment: {
+    riskFlags: unknown[];
+    symptomsExtracted: unknown[];
+    vitalsMentioned: unknown;
+    overallAcuity: string;
+    redFlags: string[];
+    confidence: number;
+  };
+  clinicalSummary: {
+    chiefComplaint: string;
+    summaryText: string;
+    keyFindings: string[];
+    timeline: string;
+    pertinentNegatives: string[];
+    confidence: number;
+  };
+  nextSteps: {
+    recommendedAction: string;
+    urgencyTimeframe: string;
+    reasoning: string;
+    patientInstructions: string[];
+    warningSigns: string[];
+    selfCareRecommendations: string[];
+    specialistTypeRecommended: string | null;
+    confidence: number;
+  };
+}
+
+async function saveAnalysisToDatabase(
+  voiceNoteId: string,
+  patientId: string,
+  result: AnalysisResult
+) {
+  // Create risk assessment
+  const riskAssessment = await prisma.riskAssessment.create({
+    data: {
+      voiceNoteId,
+      riskFlags: JSON.stringify(result.riskAssessment.riskFlags),
+      symptomsExtracted: JSON.stringify(result.riskAssessment.symptomsExtracted),
+      vitalsMentioned: result.riskAssessment.vitalsMentioned
+        ? JSON.stringify(result.riskAssessment.vitalsMentioned)
+        : null,
+      overallAcuity: result.riskAssessment.overallAcuity,
+      redFlags: JSON.stringify(result.riskAssessment.redFlags),
+      confidence: result.riskAssessment.confidence,
+    },
+  });
+
+  // Create clinical summary
+  const clinicalSummary = await prisma.clinicalSummary.create({
+    data: {
+      riskAssessmentId: riskAssessment.id,
+      chiefComplaint: result.clinicalSummary.chiefComplaint,
+      summaryText: result.clinicalSummary.summaryText,
+      keyFindings: JSON.stringify(result.clinicalSummary.keyFindings),
+      timeline: result.clinicalSummary.timeline,
+      pertinentNegatives: JSON.stringify(result.clinicalSummary.pertinentNegatives),
+    },
+  });
+
+  // Create next steps
+  const nextSteps = await prisma.nextSteps.create({
+    data: {
+      riskAssessmentId: riskAssessment.id,
+      recommendedAction: result.nextSteps.recommendedAction,
+      urgencyTimeframe: result.nextSteps.urgencyTimeframe,
+      reasoning: result.nextSteps.reasoning,
+      patientInstructions: JSON.stringify(result.nextSteps.patientInstructions),
+      warningSigns: JSON.stringify(result.nextSteps.warningSigns),
+      selfCareRecommendations: JSON.stringify(result.nextSteps.selfCareRecommendations),
+      specialistTypeRecommended: result.nextSteps.specialistTypeRecommended,
+    },
+  });
+
+  // Create report
+  await prisma.report.create({
+    data: {
+      patientId,
+      riskAssessmentId: riskAssessment.id,
+      clinicalSummaryId: clinicalSummary.id,
+      nextStepsId: nextSteps.id,
+      status: "draft",
+    },
+  });
+}
+
+// ===========================================
+// GET /api/analyze (Health Check)
+// ===========================================
+
+export async function GET() {
+  const hasApiKey = !!process.env.ANTHROPIC_API_KEY;
+
+  return NextResponse.json({
+    status: "ok",
+    service: "ai-analysis",
+    configured: hasApiKey,
+    model: "claude-sonnet-4-20250514",
+    capabilities: [
+      "risk-assessment",
+      "clinical-summary",
+      "next-steps",
+      "doctor-matching",
+    ],
+  });
 }

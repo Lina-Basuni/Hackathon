@@ -43,16 +43,21 @@ export function getRiskBadgeColor(risk: string): string {
 
 export function getSpecialtyLabel(specialty: string): string {
   const labels: Record<string, string> = {
+    "primary-care": "Primary Care",
     cardiology: "Cardiology",
     pulmonology: "Pulmonology",
-    general: "General Medicine",
-    "infectious-disease": "Infectious Disease",
-    nephrology: "Nephrology",
     gastroenterology: "Gastroenterology",
-    neurology: "Neurology",
     endocrinology: "Endocrinology",
+    neurology: "Neurology",
+    "infectious-disease": "Infectious Disease",
+    orthopedics: "Orthopedics",
+    dermatology: "Dermatology",
+    psychiatry: "Psychiatry",
+    // Legacy
+    general: "General Medicine",
+    nephrology: "Nephrology",
   };
-  return labels[specialty] || specialty;
+  return labels[specialty] || specialty.charAt(0).toUpperCase() + specialty.slice(1);
 }
 
 export function generateShareToken(): string {
