@@ -8,8 +8,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/app
 import { useVoiceRecorder } from "@/app/hooks/useVoiceRecorder";
 import { formatDuration } from "@/app/lib/utils";
 
-type Step = "record" | "transcribing" | "analyzing" | "complete";
-
 export default function RecordPage() {
   const router = useRouter();
   const {
@@ -26,67 +24,37 @@ export default function RecordPage() {
     error: recorderError,
   } = useVoiceRecorder();
 
-  const [step, setStep] = useState<Step>("record");
-  const [transcript, setTranscript] = useState("");
-  const [analysisResult, setAnalysisResult] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [isProcessing, setIsProcessing] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleSubmit = async () => {
     if (!audioBlob) return;
 
-    setIsProcessing(true);
+    setIsSubmitting(true);
     setError(null);
 
     try {
-      // Step 1: Transcribe
-      setStep("transcribing");
+      // Submit audio to the report generation pipeline
       const formData = new FormData();
       formData.append("audio", audioBlob, "recording.webm");
       formData.append("patientId", "demo-patient");
 
-      const transcribeRes = await fetch("/api/voice-notes/transcribe", {
+      const response = await fetch("/api/reports/generate", {
         method: "POST",
         body: formData,
       });
 
-      const transcribeData = await transcribeRes.json();
+      const data = await response.json();
 
-      if (!transcribeData.success) {
-        throw new Error(transcribeData.error || "Transcription failed");
+      if (!data.success) {
+        throw new Error(data.error || "Failed to start report generation");
       }
 
-      setTranscript(transcribeData.data.transcript);
-
-      // Step 2: Analyze
-      setStep("analyzing");
-      const analyzeRes = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          voiceNoteId: transcribeData.data.voiceNoteId,
-          transcript: transcribeData.data.transcript,
-        }),
-      });
-
-      const analyzeData = await analyzeRes.json();
-
-      if (!analyzeData.success) {
-        throw new Error(analyzeData.error || "Analysis failed");
-      }
-
-      setAnalysisResult(analyzeData.data);
-      setStep("complete");
-
-      // Redirect to reports page after success
-      setTimeout(() => {
-        router.push("/reports");
-      }, 2000);
+      // Redirect to processing page with job ID
+      router.push(`/processing?jobId=${data.data.jobId}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
-      setStep("record");
-    } finally {
-      setIsProcessing(false);
+      setIsSubmitting(false);
     }
   };
 
@@ -190,19 +158,20 @@ export default function RecordPage() {
                   <Button
                     size="xl"
                     onClick={handleSubmit}
-                    disabled={isProcessing}
+                    disabled={isSubmitting}
                     className="rounded-full px-8"
                   >
-                    {isProcessing ? (
-                      <Loader2 className="w-5 h-5 animate-spin mr-2" />
+                    {isSubmitting ? (
+                      <>
+                        <Loader2 className="w-5 h-5 animate-spin mr-2" />
+                        Starting...
+                      </>
                     ) : (
-                      <Send className="w-5 h-5 mr-2" />
+                      <>
+                        <Send className="w-5 h-5 mr-2" />
+                        Analyze
+                      </>
                     )}
-                    {step === "transcribing"
-                      ? "Transcribing..."
-                      : step === "analyzing"
-                      ? "Analyzing..."
-                      : "Analyze"}
                   </Button>
                 </>
               )}
@@ -210,49 +179,6 @@ export default function RecordPage() {
           </div>
         </CardContent>
       </Card>
-
-      {/* Progress Indicator */}
-      {isProcessing && (
-        <Card>
-          <CardContent className="py-6">
-            <div className="space-y-4">
-              <StepIndicator
-                step={1}
-                label="Transcribing audio"
-                isActive={step === "transcribing"}
-                isComplete={step === "analyzing" || step === "complete"}
-              />
-              <StepIndicator
-                step={2}
-                label="AI analysis"
-                isActive={step === "analyzing"}
-                isComplete={step === "complete"}
-              />
-              <StepIndicator
-                step={3}
-                label="Generating report"
-                isActive={step === "complete"}
-                isComplete={false}
-              />
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Success Message */}
-      {step === "complete" && analysisResult && (
-        <Card className="border-green-200 bg-green-50">
-          <CardContent className="py-6 text-center">
-            <div className="w-12 h-12 bg-green-500 text-white rounded-full flex items-center justify-center mx-auto mb-4">
-              ✓
-            </div>
-            <h3 className="font-semibold text-lg mb-2">Analysis Complete!</h3>
-            <p className="text-muted-foreground">
-              Redirecting to your report...
-            </p>
-          </CardContent>
-        </Card>
-      )}
 
       {/* Tips */}
       <Card className="mt-6 bg-blue-50 border-blue-200">
@@ -273,38 +199,3 @@ export default function RecordPage() {
   );
 }
 
-function StepIndicator({
-  step,
-  label,
-  isActive,
-  isComplete,
-}: {
-  step: number;
-  label: string;
-  isActive: boolean;
-  isComplete: boolean;
-}) {
-  return (
-    <div className="flex items-center gap-3">
-      <div
-        className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium transition-colors ${
-          isComplete
-            ? "bg-green-500 text-white"
-            : isActive
-            ? "bg-primary text-white"
-            : "bg-muted text-muted-foreground"
-        }`}
-      >
-        {isComplete ? "✓" : step}
-      </div>
-      <span
-        className={`${
-          isActive ? "text-foreground font-medium" : "text-muted-foreground"
-        }`}
-      >
-        {label}
-        {isActive && <Loader2 className="w-4 h-4 inline ml-2 animate-spin" />}
-      </span>
-    </div>
-  );
-}

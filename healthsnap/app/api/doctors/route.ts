@@ -68,16 +68,18 @@ export async function GET(request: NextRequest) {
         timeSlots: {
           where: {
             isBooked: false,
-            datetime: dateRange ? {
+            isBlocked: false,
+            date: dateRange ? {
               gte: dateRange.start,
               lt: dateRange.end,
             } : {
               gte: new Date(),
             },
           },
-          orderBy: {
-            datetime: "asc",
-          },
+          orderBy: [
+            { date: "asc" },
+            { startTime: "asc" },
+          ],
           take: 20, // Limit slots for performance
         },
       },
@@ -109,6 +111,16 @@ export async function GET(request: NextRequest) {
           return null;
         }
 
+        // Compute nextAvailableSlot from date and startTime
+        let nextAvailableSlot: Date | null = null;
+        if (doctor.timeSlots[0]) {
+          const slot = doctor.timeSlots[0];
+          nextAvailableSlot = new Date(slot.date);
+          // Parse startTime (e.g., "09:00") and apply to date
+          const [hours, minutes] = slot.startTime.split(":").map(Number);
+          nextAvailableSlot.setHours(hours, minutes, 0, 0);
+        }
+
         return {
           id: doctor.id,
           name: doctor.name,
@@ -122,7 +134,7 @@ export async function GET(request: NextRequest) {
           bio: doctor.bio,
           imageUrl: doctor.imageUrl,
           available: doctor.available,
-          nextAvailableSlot: doctor.timeSlots[0]?.datetime || null,
+          nextAvailableSlot,
           availableSlotsCount: doctor.timeSlots.length,
         };
       })
