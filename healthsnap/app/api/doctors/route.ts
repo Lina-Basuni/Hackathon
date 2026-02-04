@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
+import Anthropic from "@anthropic-ai/sdk";
 import prisma from "@/app/lib/prisma";
 import type { DoctorWithAvailability, AIRecommendation } from "@/app/components/doctors/types";
+import {
+  DOCTOR_MATCHING_SYSTEM_PROMPT,
+  buildDoctorMatchingPrompt,
+  parseDoctorMatchingResponse,
+} from "@/app/lib/prompts/doctor-matching";
 
 // ===========================================
 // GET /api/doctors
@@ -346,100 +352,176 @@ async function computeAIMatches(
   doctors: DoctorWithAvailability[],
   report: ReportWithAnalysis
 ): Promise<AIRecommendation | null> {
+  // Check if we have an API key for real AI matching
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.log("No ANTHROPIC_API_KEY - using fallback heuristic matching");
+    return computeFallbackMatches(doctors, report);
+  }
+
   try {
-    // Compute match scores based on specialty and other factors
-    const recommendedSpecialty = report.specialistTypeRecommended || "primary-care";
+    console.log("Using Claude AI for doctor matching...");
+    const anthropic = new Anthropic();
 
-    const matches = doctors
-      .map((doctor) => {
-        let matchScore = 0;
-        const matchReasons: string[] = [];
+    // Build the risk assessment and next steps for the prompt
+    const riskAssessment = {
+      symptomsExtracted: report.symptomsExtracted.map((s) => ({
+        symptom: s,
+        severity: "moderate" as const,
+        duration: "unknown",
+        location: undefined,
+      })),
+      overallAcuity: report.overallAcuity as "routine" | "urgent" | "emergent",
+      riskFlags: [] as { flag: string; severity: "low" | "moderate" | "high" | "critical"; description: string; clinicalRationale: string }[],
+      vitalsMentioned: null,
+      redFlags: [] as string[],
+      confidence: 0.8,
+      reasoning: "Based on patient report analysis",
+    };
 
-        // Specialty match (40%)
-        if (doctor.specialty === recommendedSpecialty) {
-          matchScore += 0.4;
-          matchReasons.push(`Specialist in ${formatSpecialty(doctor.specialty)}`);
-        } else if (doctor.specialty === "primary-care") {
-          matchScore += 0.2;
-          matchReasons.push("General practice can evaluate initial concerns");
-        }
+    const nextSteps = {
+      specialistTypeRecommended: report.specialistTypeRecommended,
+      urgencyTimeframe: report.urgencyTimeframe,
+      recommendedAction: "Consult with recommended specialist",
+      reasoning: "Based on symptom analysis",
+      patientInstructions: [] as string[],
+      warningSigns: [] as string[],
+      selfCareRecommendations: [] as string[],
+      followUpRecommendation: "Follow up as recommended by specialist",
+      confidence: 0.8,
+    };
 
-        // Rating score (20%)
-        const ratingScore = (doctor.rating / 5) * 0.2;
-        matchScore += ratingScore;
-        if (doctor.rating >= 4.5) {
-          matchReasons.push(`Highly rated (${doctor.rating.toFixed(1)} stars)`);
-        }
+    // Build doctors for matching prompt
+    const doctorsForMatching = doctors.slice(0, 10).map((d) => ({
+      id: d.id,
+      name: d.name,
+      specialty: d.specialty,
+      yearsExperience: d.yearsExperience,
+      rating: d.rating,
+      location: d.location ?? undefined,
+      languages: d.languages,
+      availableSlots: d.availableSlotsCount,
+    }));
 
-        // Experience score (15%)
-        const expScore = Math.min(doctor.yearsExperience / 20, 1) * 0.15;
-        matchScore += expScore;
-        if (doctor.yearsExperience >= 10) {
-          matchReasons.push(`${doctor.yearsExperience} years of experience`);
-        }
+    const prompt = buildDoctorMatchingPrompt(riskAssessment, nextSteps, doctorsForMatching);
 
-        // Availability score (15%)
-        if (doctor.nextAvailableSlot) {
-          const daysUntilAvailable = Math.ceil(
-            (new Date(doctor.nextAvailableSlot).getTime() - Date.now()) / (1000 * 60 * 60 * 24)
-          );
-          if (daysUntilAvailable <= 1) {
-            matchScore += 0.15;
-            matchReasons.push("Available today or tomorrow");
-          } else if (daysUntilAvailable <= 3) {
-            matchScore += 0.1;
-            matchReasons.push("Available within 3 days");
-          } else if (daysUntilAvailable <= 7) {
-            matchScore += 0.05;
-          }
-        }
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1024,
+      system: DOCTOR_MATCHING_SYSTEM_PROMPT,
+      messages: [{ role: "user", content: prompt }],
+    });
 
-        // Available slots bonus (10%)
-        if (doctor.availableSlotsCount >= 5) {
-          matchScore += 0.1;
-          matchReasons.push("Multiple appointment times available");
-        } else if (doctor.availableSlotsCount > 0) {
-          matchScore += 0.05;
-        }
-
-        // Determine specialty relevance
-        let specialtyRelevance = "Not directly related to your condition";
-        if (doctor.specialty === recommendedSpecialty) {
-          specialtyRelevance = "Specialist recommended for your symptoms";
-        } else if (doctor.specialty === "primary-care") {
-          specialtyRelevance = "Can provide initial evaluation and referral if needed";
-        }
-
-        return {
-          doctorId: doctor.id,
-          matchScore: Math.min(matchScore, 1), // Cap at 1.0
-          matchReasons: matchReasons.slice(0, 3), // Top 3 reasons
-          specialtyRelevance,
-        };
-      })
-      .filter((m) => m.matchScore >= 0.3) // Only include reasonable matches
-      .sort((a, b) => b.matchScore - a.matchScore)
-      .slice(0, 10); // Top 10 matches
-
-    // Build urgency note based on acuity
-    let urgencyNote = "Schedule at your convenience";
-    if (report.overallAcuity === "emergent") {
-      urgencyNote = "Seek immediate medical attention - consider emergency services";
-    } else if (report.overallAcuity === "urgent") {
-      urgencyNote = report.urgencyTimeframe || "Schedule within 24-48 hours";
-    } else {
-      urgencyNote = report.urgencyTimeframe || "Schedule within the next week";
+    const textContent = response.content.find((c) => c.type === "text");
+    if (!textContent || textContent.type !== "text") {
+      throw new Error("No text response from Claude");
     }
 
+    const aiResult = parseDoctorMatchingResponse(textContent.text);
+
     return {
-      recommendedSpecialty,
-      urgencyNote,
-      matches,
+      recommendedSpecialty: aiResult.recommendedSpecialty,
+      urgencyNote: aiResult.urgencyNote,
+      matches: aiResult.matches,
     };
   } catch (error) {
-    console.error("Error computing AI matches:", error);
-    return null;
+    console.error("Claude AI matching failed, using fallback:", error);
+    return computeFallbackMatches(doctors, report);
   }
+}
+
+// Fallback heuristic matching when AI is unavailable
+function computeFallbackMatches(
+  doctors: DoctorWithAvailability[],
+  report: ReportWithAnalysis
+): AIRecommendation {
+  const recommendedSpecialty = report.specialistTypeRecommended || "primary-care";
+
+  const matches = doctors
+    .map((doctor) => {
+      let matchScore = 0;
+      const matchReasons: string[] = [];
+
+      // Specialty match (40%)
+      if (doctor.specialty === recommendedSpecialty) {
+        matchScore += 0.4;
+        matchReasons.push(`Specialist in ${formatSpecialty(doctor.specialty)}`);
+      } else if (doctor.specialty === "primary-care") {
+        matchScore += 0.2;
+        matchReasons.push("General practice can evaluate initial concerns");
+      }
+
+      // Rating score (20%)
+      const ratingScore = (doctor.rating / 5) * 0.2;
+      matchScore += ratingScore;
+      if (doctor.rating >= 4.5) {
+        matchReasons.push(`Highly rated (${doctor.rating.toFixed(1)} stars)`);
+      }
+
+      // Experience score (15%)
+      const expScore = Math.min(doctor.yearsExperience / 20, 1) * 0.15;
+      matchScore += expScore;
+      if (doctor.yearsExperience >= 10) {
+        matchReasons.push(`${doctor.yearsExperience} years of experience`);
+      }
+
+      // Availability score (15%)
+      if (doctor.nextAvailableSlot) {
+        const daysUntilAvailable = Math.ceil(
+          (new Date(doctor.nextAvailableSlot).getTime() - Date.now()) / (1000 * 60 * 60 * 24)
+        );
+        if (daysUntilAvailable <= 1) {
+          matchScore += 0.15;
+          matchReasons.push("Available today or tomorrow");
+        } else if (daysUntilAvailable <= 3) {
+          matchScore += 0.1;
+          matchReasons.push("Available within 3 days");
+        } else if (daysUntilAvailable <= 7) {
+          matchScore += 0.05;
+        }
+      }
+
+      // Available slots bonus (10%)
+      if (doctor.availableSlotsCount >= 5) {
+        matchScore += 0.1;
+        matchReasons.push("Multiple appointment times available");
+      } else if (doctor.availableSlotsCount > 0) {
+        matchScore += 0.05;
+      }
+
+      // Determine specialty relevance
+      let specialtyRelevance = "Not directly related to your condition";
+      if (doctor.specialty === recommendedSpecialty) {
+        specialtyRelevance = "Specialist recommended for your symptoms";
+      } else if (doctor.specialty === "primary-care") {
+        specialtyRelevance = "Can provide initial evaluation and referral if needed";
+      }
+
+      return {
+        doctorId: doctor.id,
+        matchScore: Math.min(matchScore, 1),
+        matchReasons: matchReasons.slice(0, 3),
+        specialtyRelevance,
+      };
+    })
+    .filter((m) => m.matchScore >= 0.3)
+    .sort((a, b) => b.matchScore - a.matchScore)
+    .slice(0, 10);
+
+  // Build urgency note based on acuity
+  let urgencyNote = "Schedule at your convenience";
+  if (report.overallAcuity === "emergent") {
+    urgencyNote = "Seek immediate medical attention - consider emergency services";
+  } else if (report.overallAcuity === "urgent") {
+    urgencyNote = report.urgencyTimeframe || "Schedule within 24-48 hours";
+  } else {
+    urgencyNote = report.urgencyTimeframe || "Schedule within the next week";
+  }
+
+  return {
+    recommendedSpecialty,
+    urgencyNote,
+    matches,
+  };
 }
 
 function formatSpecialty(specialty: string): string {
